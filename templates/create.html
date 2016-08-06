@@ -2,11 +2,11 @@
 {% block body %}
 <form method="POST">
     {{ form.hidden_tag() }}
-    <div class="form-group row {{ 'has-error' if form.sessionName.errors else '' }}">
-        {{ form.sessionName.label(class="col-sm-2 control-label") }}
+    <div class="form-group row">
+        {{ form.session_id.label(class="col-sm-2 control-label") }}
         <div class="col-sm-4">
-            {{ form.sessionName(class="form-control") }}
-            {% for error in form.sessionName.errors %}<span class="help-block">{{ error }}</span>{% endfor %}
+            {{ form.session_id(class="form-control") }}
+            {% for error in form.session_id.errors %}<span class="help-block">{{ error }}</span>{% endfor %}
         </div>
     </div>
     <div class="form-group row {{ 'has-error' if form.username.errors else '' }}">

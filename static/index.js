@@ -1,5 +1,5 @@
 $(document).ready(function() {
-    var socket = io('/session');
+    var socket = io('/session', {'sync disconnect on unload': true});
     var getMessageItem = function(user, msg) {
         return $('<li>').addClass('list-group-item')
             .append($('<h4>').addClass('list-group-item-heading').text(user))
@@ -45,18 +45,17 @@ $(document).ready(function() {
     });
 
     socket.on('joined', function(data) {
-        var $messages = $('#messages');
-        var $players = $('#player-list');
         if($('#' + data.id).length > 0) {
             return;
         }
 
+        var $messages = $('#messages');
         $messages
             .append(getMessageItem(data.user, 'has joined the session'))
-            .scrollTop($('#messages')[0].scrollHeight);
+            .scrollTop($messages[0].scrollHeight);
 
         if(data.role == 'player') {
-            $players.append($('<li>')
+            $('#player-list').append($('<li>')
                 .attr('id', data.id)
                 .addClass('list-group-item')
                 .text(data.user)
@@ -68,7 +67,7 @@ $(document).ready(function() {
         var $messages = $('#messages');
         $messages
             .append(getMessageItem(data.user, data.message))
-            .scrollTop($('#messages')[0].scrollHeight);
+            .scrollTop($messages[0].scrollHeight);
     });
 
     socket.on('set-topic', function(topic) {
@@ -83,7 +82,6 @@ $(document).ready(function() {
         else {
             $vote.text(data.points)
         }
-
     });
 
     socket.on('show-votes', function() {
@@ -99,5 +97,13 @@ $(document).ready(function() {
             .empty()
             .removeData()
             .addClass('glyphicon glyphicon-remove');
+    });
+
+    socket.on('left', function(data) {
+        $('#' + data.id).remove();
+        var $messages = $('#messages');
+        $messages
+            .append(getMessageItem(data.user, 'has left the session'))
+            .scrollTop($messages[0].scrollHeight);
     });
 });

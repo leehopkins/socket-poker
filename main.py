@@ -1,13 +1,15 @@
+import os
+import redis
 import uuid
-from flask import render_template, session, redirect, url_for
-from flask_socketio import emit, join_room, leave_room
+from flask import Flask, render_template, session, redirect, url_for
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from forms import CreateSessionForm
-from helpers import getSessionVars, init_app
 
-app, socketio = init_app(True)
-# this is not really safe, just wanted to imitate a persistence layer
-# TODO: implement a real persistence layer
-sessions = {}
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+app.debug = True
+socketio = SocketIO(app)
+r = redis.from_url(os.environ.get('REDIS_URL'))
 
 @app.route('/')
 def index():
@@ -17,83 +19,98 @@ def index():
 def create_or_join():
     form = CreateSessionForm()
 
-    if form.validate_on_submit():
-        poker_session = sessions.get(form.sessionName.data)
-        if poker_session is None:
-            poker_session = { 'people': {} }
-            sessions[form.sessionName.data] = poker_session
+    if not form.validate_on_submit():
+        return render_template('create.html', form=form)
 
-        uid = uuid.uuid4()
-        poker_session['people'][str(uid)] = { 'username': form.username.data, 'role': form.role.data, 'vote': '' }
-        session['sessionName'] = form.sessionName.data
-        session['username'] = form.username.data
-        session['role'] = form.role.data
-        session['userId'] = uid
-        return redirect(url_for('view_session', token=form.sessionName.data))
+    session_key = 'session:' + form.session_id.data
+    if len(form.session_id.data) == 0:
+        session_key = session_key + str(r.incr('session:idx'))
+        r.hset(session_key, 'people_key', 'people:' + str(r.incr('people:idx')))
 
-    return render_template('create.html', form=form)
+    uid = str(uuid.uuid4())
+    r.sadd(r.hget(session_key, 'people_key'), uid)
+    r.hmset(uid, { 'username': form.username.data, 'role': form.role.data, 'vote': '' })
+    session['user_id'] = uid
+    session['poker_session_id'] = session_key[8:]
+    return redirect(url_for('view_session', sid=session_key[8:]))
 
-@app.route('/session/<token>')
-def view_session(token):
-    poker_session = sessions.get(token)
-    name, user, role, uid = getSessionVars()
-    if poker_session is None or name is None or user is None or name != token:
+
+@app.route('/session/<sid>')
+def view_session(sid):
+    uid = session.get('user_id')
+    poker_session = r.hgetall('session:' + sid)
+    if uid is None or not poker_session:
         return redirect(url_for('create_or_join'))
 
-    print poker_session
+    role = r.hget(uid, 'role')
+    poker_session['people'] = {}
+    for pid in r.smembers(poker_session['people_key']):
+        poker_session['people'][pid] = r.hgetall(pid)
+
     return render_template('session.html', role=role, poker_session=poker_session)
 
 @socketio.on('connect', namespace='/session')
 def joined():
-    name, user, role, uid = getSessionVars()
-    join_room(name)
-    emit('joined', { 'user': user, 'id': uid, 'role': role }, room=name)
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    join_room(sid)
+    user = r.hgetall(uid)
+    emit('joined', { 'user': user['username'], 'id': uid, 'role': user['role'] }, room=sid)
 
 @socketio.on('chat-message', namespace='/session')
 def chat_message(message):
-    name, user, role, uid = getSessionVars()
-    emit('chat-message', { 'message': message, 'user': user }, room=name)
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    emit('chat-message', { 'message': message, 'user': r.hget(uid, 'username') }, room=sid)
 
 @socketio.on('set-topic', namespace='/session')
 def set_topic(topic):
-    name, user, role, uid = getSessionVars()
-    poker_session = sessions.get(name)
-    if role != 'admin' or poker_session is None:
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    if r.hget(uid, 'role') != 'admin':
         return;
 
-    poker_session['topic'] = topic
-    emit('set-topic', topic, room=name)
+    r.hset('session:' + sid, 'topic', topic)
+    emit('set-topic', topic, room=sid)
 
 @socketio.on('vote', namespace='/session')
 def vote(points):
-    name, user, role, uid = getSessionVars()
-    poker_session = sessions.get(name)
-    if role != 'player' or poker_session is None:
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    if r.hget(uid, 'role') != 'player':
         return;
 
-    poker_session['people'][uid]['vote'] = points
-    emit('vote', { 'points': points, 'user': user, 'id': uid }, room=name)
+    r.hset(uid, 'vote', points)
+    emit('vote', { 'points': points, 'user': r.hget(uid, 'username'), 'id': uid }, room=sid)
 
 @socketio.on('show-votes', namespace='/session')
 def show_votes():
-    name, user, role, uid = getSessionVars()
-    if role != 'admin':
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    if r.hget(uid, 'role') != 'admin':
         return;
 
-    emit('show-votes', room=name)
+    emit('show-votes', room=sid)
 
 @socketio.on('clear-votes', namespace='/session')
 def clear_votes():
-    name, user, role, uid = getSessionVars()
-    poker_session = sessions.get(name)
-    if role != 'admin' or poker_session is None:
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    if r.hget(uid, 'role') != 'admin':
         return;
 
-    for uid, person in poker_session['people'].items():
-        person['vote'] = ''
+    people_ids = r.smembers(r.hget('session:' + sid, 'people_key'))
+    for pid in people_ids:
+        r.hset(pid, 'vote', '')
 
-    emit('clear-votes', room=name)
+    emit('clear-votes', room=sid)
 
+@socketio.on('disconnect', namespace='/session')
+def left():
+    uid, sid = session.get('user_id'), session.get('poker_session_id')
+    user = r.hgetall(uid)
+    poker_session = r.hgetall('session:' + sid)
+    r.delete(uid)
+    r.srem(poker_session['people_key'], uid)
+    if r.scard(poker_session['people_key']) == 0:
+        r.delete(poker_session['people_key'], 'session:' + sid)
+
+    leave_room(sid)
+    emit('left', { 'user': user['username'], 'id': uid, 'role': user['role'] }, room=sid)
 
 if __name__ == '__main__':
     socketio.run(app)
